@@ -24,7 +24,7 @@ import streamlit as st
 from datetime import datetime, timezone
 from dateutil.relativedelta import relativedelta
 from urllib.parse import urlparse
-from io import StringIO
+from io import StringIO, BytesIO
 
 
 # -----------------------------
@@ -48,7 +48,7 @@ HEADERS = {
 
 
 # -----------------------------
-# Функции
+# Функции для работы со ссылкой и текстом
 # -----------------------------
 
 def extract_app_id(app_url: str) -> str:
@@ -105,6 +105,25 @@ def safe_get_label_value(obj: dict) -> str:
 
     return ""
 
+
+def make_safe_filename_part(text: str) -> str:
+    """
+    Делает безопасную часть имени файла из названия приложения.
+    """
+
+    if not text:
+        return ""
+
+    text = text.strip().lower()
+    text = re.sub(r"\s+", "_", text)
+    text = re.sub(r"[^a-zA-Zа-яА-ЯёЁ0-9_\-]", "", text)
+
+    return text[:50]
+
+
+# -----------------------------
+# Функции для сбора отзывов
+# -----------------------------
 
 def parse_review_entry(entry: dict) -> dict:
     """
@@ -208,21 +227,6 @@ def get_app_name_from_first_page(app_id: str, country: str = COUNTRY) -> str:
         pass
 
     return ""
-
-
-def make_safe_filename_part(text: str) -> str:
-    """
-    Делает безопасную часть имени файла из названия приложения.
-    """
-
-    if not text:
-        return ""
-
-    text = text.strip().lower()
-    text = re.sub(r"\s+", "_", text)
-    text = re.sub(r"[^a-zA-Zа-яА-ЯёЁ0-9_\-]", "", text)
-
-    return text[:50]
 
 
 def collect_reviews(app_id: str, progress_bar=None, log_container=None) -> tuple[pd.DataFrame, dict]:
@@ -346,16 +350,220 @@ def collect_reviews(app_id: str, progress_bar=None, log_container=None) -> tuple
     return df, stats
 
 
+# -----------------------------
+# Функции для структурирования таблиц
+# -----------------------------
+
+def prepare_structured_tables(df: pd.DataFrame) -> dict:
+    """
+    Готовит несколько структурированных таблиц для анализа отзывов.
+    """
+
+    prepared_df = df.copy()
+
+    # Приводим рейтинг к числу
+    prepared_df["rating"] = pd.to_numeric(
+        prepared_df["rating"],
+        errors="coerce"
+    )
+
+    # Добавляем длину текста — удобно искать содержательные отзывы
+    prepared_df["review_length"] = prepared_df["review_text"].fillna("").str.len()
+
+    # Добавляем группу отзыва по оценке
+    def get_review_group(rating):
+        if rating in [1, 2]:
+            return "Негативные"
+        elif rating == 3:
+            return "Нейтральные"
+        elif rating in [4, 5]:
+            return "Позитивные"
+        return "Без оценки"
+
+    prepared_df["review_group"] = prepared_df["rating"].apply(get_review_group)
+
+    # Все отзывы: удобно сначала смотреть проблемные и содержательные
+    all_reviews = prepared_df[
+        ["rating", "review_group", "title", "review_text", "review_length"]
+    ].sort_values(
+        by=["rating", "review_length"],
+        ascending=[True, False]
+    )
+
+    # Сводка по оценкам
+    rating_summary = (
+        prepared_df
+        .groupby("rating", dropna=False)
+        .size()
+        .reset_index(name="reviews_count")
+        .sort_values("rating")
+    )
+
+    # Сводка по группам
+    group_summary = (
+        prepared_df
+        .groupby("review_group", dropna=False)
+        .size()
+        .reset_index(name="reviews_count")
+        .sort_values("reviews_count", ascending=False)
+    )
+
+    # Негативные отзывы
+    negative_reviews = prepared_df[
+        prepared_df["rating"].isin([1, 2])
+    ][
+        ["rating", "title", "review_text", "review_length"]
+    ].sort_values(
+        by=["rating", "review_length"],
+        ascending=[True, False]
+    )
+
+    # Нейтральные отзывы
+    neutral_reviews = prepared_df[
+        prepared_df["rating"] == 3
+    ][
+        ["rating", "title", "review_text", "review_length"]
+    ].sort_values(
+        by="review_length",
+        ascending=False
+    )
+
+    # Позитивные отзывы
+    positive_reviews = prepared_df[
+        prepared_df["rating"].isin([4, 5])
+    ][
+        ["rating", "title", "review_text", "review_length"]
+    ].sort_values(
+        by=["rating", "review_length"],
+        ascending=[False, False]
+    )
+
+    # Самые длинные отзывы
+    long_reviews = prepared_df[
+        ["rating", "review_group", "title", "review_text", "review_length"]
+    ].sort_values(
+        by="review_length",
+        ascending=False
+    ).head(100)
+
+    # Общая аналитика
+    total_reviews = len(prepared_df)
+    average_rating = prepared_df["rating"].mean()
+
+    negative_count = len(negative_reviews)
+    neutral_count = len(neutral_reviews)
+    positive_count = len(positive_reviews)
+
+    analytics = pd.DataFrame([
+        {
+            "metric": "Всего отзывов",
+            "value": total_reviews
+        },
+        {
+            "metric": "Средняя оценка",
+            "value": round(average_rating, 2) if pd.notna(average_rating) else ""
+        },
+        {
+            "metric": "Негативных отзывов, 1–2 звезды",
+            "value": negative_count
+        },
+        {
+            "metric": "Нейтральных отзывов, 3 звезды",
+            "value": neutral_count
+        },
+        {
+            "metric": "Позитивных отзывов, 4–5 звезд",
+            "value": positive_count
+        },
+        {
+            "metric": "Доля негативных отзывов",
+            "value": f"{round(negative_count / total_reviews * 100, 1)}%" if total_reviews else "0%"
+        },
+        {
+            "metric": "Доля нейтральных отзывов",
+            "value": f"{round(neutral_count / total_reviews * 100, 1)}%" if total_reviews else "0%"
+        },
+        {
+            "metric": "Доля позитивных отзывов",
+            "value": f"{round(positive_count / total_reviews * 100, 1)}%" if total_reviews else "0%"
+        },
+    ])
+
+    return {
+        "Все отзывы": all_reviews,
+        "Аналитика": analytics,
+        "Сводка по оценкам": rating_summary,
+        "Сводка по группам": group_summary,
+        "Негативные": negative_reviews,
+        "Нейтральные": neutral_reviews,
+        "Позитивные": positive_reviews,
+        "Длинные отзывы": long_reviews,
+    }
+
+
 def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
     """
-    Преобразует DataFrame в CSV в кодировке utf-8-sig.
-    utf-8-sig нужен, чтобы файл корректно открывался в Excel.
+    Создает обычный CSV-файл для совместимости.
+    В CSV остаются только три исходные колонки:
+    rating, title, review_text.
     """
 
     csv_buffer = StringIO()
-    df.to_csv(csv_buffer, index=False, encoding="utf-8-sig")
+
+    df[["rating", "title", "review_text"]].to_csv(
+        csv_buffer,
+        index=False,
+        encoding="utf-8-sig"
+    )
 
     return csv_buffer.getvalue().encode("utf-8-sig")
+
+
+def structured_tables_to_excel_bytes(tables: dict) -> bytes:
+    """
+    Создает Excel-файл с несколькими листами.
+    """
+
+    output = BytesIO()
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet_name, table in tables.items():
+            # Excel ограничивает название листа 31 символом
+            safe_sheet_name = sheet_name[:31]
+
+            table.to_excel(
+                writer,
+                sheet_name=safe_sheet_name,
+                index=False
+            )
+
+            worksheet = writer.sheets[safe_sheet_name]
+
+            # Закрепляем верхнюю строку
+            worksheet.freeze_panes = "A2"
+
+            # Включаем автофильтр
+            if worksheet.max_row > 1 and worksheet.max_column > 1:
+                worksheet.auto_filter.ref = worksheet.dimensions
+
+            # Настраиваем ширину колонок
+            for column_cells in worksheet.columns:
+                max_length = 0
+                column_letter = column_cells[0].column_letter
+
+                for cell in column_cells:
+                    try:
+                        cell_value = str(cell.value) if cell.value is not None else ""
+                        max_length = max(max_length, len(cell_value))
+                    except Exception:
+                        pass
+
+                adjusted_width = min(max(max_length + 2, 12), 70)
+                worksheet.column_dimensions[column_letter].width = adjusted_width
+
+    output.seek(0)
+
+    return output.getvalue()
 
 
 # -----------------------------
@@ -365,13 +573,15 @@ def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
 st.set_page_config(
     page_title="Сбор отзывов App Store",
     page_icon="📱",
-    layout="centered"
+    layout="wide"
 )
 
 st.title("Сбор отзывов из App Store")
+
 st.write(
     "Приложение собирает русскоязычные отзывы из российского App Store "
-    "за последние 12 месяцев и сохраняет результат в CSV."
+    "за последние 12 месяцев, показывает структурированные таблицы "
+    "и сохраняет результат в CSV и Excel."
 )
 
 st.info(
@@ -415,7 +625,7 @@ if start_button:
 
     st.subheader("Итоговая статистика")
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
 
     with col1:
         st.metric(
@@ -427,6 +637,12 @@ if start_button:
         st.metric(
             "После фильтрации",
             stats["filtered_count"]
+        )
+
+    with col3:
+        st.metric(
+            "Ошибок страниц",
+            len(stats["page_errors"])
         )
 
     st.write(f"Отзывы учитывались с даты: `{stats['cutoff_date']}`")
@@ -455,24 +671,64 @@ if start_button:
         )
         st.stop()
 
-    st.subheader("Предпросмотр данных")
-    st.dataframe(df.head(20), use_container_width=True)
+    # -----------------------------
+    # Структурированные таблицы
+    # -----------------------------
+
+    structured_tables = prepare_structured_tables(df)
+
+    st.subheader("Структурированные таблицы")
+
+    tab_names = list(structured_tables.keys())
+    tabs = st.tabs(tab_names)
+
+    for tab, table_name in zip(tabs, tab_names):
+        with tab:
+            table = structured_tables[table_name]
+
+            st.write(f"Строк в таблице: **{len(table)}**")
+
+            st.dataframe(
+                table,
+                use_container_width=True,
+                hide_index=True
+            )
+
+    # -----------------------------
+    # Подготовка файлов
+    # -----------------------------
 
     app_name = get_app_name_from_first_page(app_id=app_id, country=COUNTRY)
     safe_app_name = make_safe_filename_part(app_name)
 
     if safe_app_name:
-        output_filename = f"{safe_app_name}_appstore_reviews.csv"
+        csv_filename = f"{safe_app_name}_appstore_reviews.csv"
+        excel_filename = f"{safe_app_name}_appstore_reviews_structured.xlsx"
     else:
-        output_filename = "appstore_reviews.csv"
+        csv_filename = "appstore_reviews.csv"
+        excel_filename = "appstore_reviews_structured.xlsx"
 
     csv_bytes = dataframe_to_csv_bytes(df)
+    excel_bytes = structured_tables_to_excel_bytes(structured_tables)
 
-    st.download_button(
-        label="Скачать CSV",
-        data=csv_bytes,
-        file_name=output_filename,
-        mime="text/csv"
-    )
+    st.subheader("Скачать файлы")
 
-    st.success(f"Файл готов: {output_filename}")
+    download_col1, download_col2 = st.columns(2)
+
+    with download_col1:
+        st.download_button(
+            label="Скачать обычный CSV",
+            data=csv_bytes,
+            file_name=csv_filename,
+            mime="text/csv"
+        )
+
+    with download_col2:
+        st.download_button(
+            label="Скачать структурированный Excel",
+            data=excel_bytes,
+            file_name=excel_filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    st.success("Файлы готовы к скачиванию.")
