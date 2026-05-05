@@ -695,40 +695,55 @@ if start_button:
             )
 
     # -----------------------------
-    # Подготовка файлов
-    # -----------------------------
+# Подготовка файлов
+# -----------------------------
 
-    app_name = get_app_name_from_first_page(app_id=app_id, country=COUNTRY)
-    safe_app_name = make_safe_filename_part(app_name)
+app_name = get_app_name_from_first_page(app_id=app_id, country=COUNTRY)
+safe_app_name = make_safe_filename_part(app_name)
 
-    if safe_app_name:
-        csv_filename = f"{safe_app_name}_appstore_reviews.csv"
-        excel_filename = f"{safe_app_name}_appstore_reviews_structured.xlsx"
-    else:
-        csv_filename = "appstore_reviews.csv"
-        excel_filename = "appstore_reviews_structured.xlsx"
+if safe_app_name:
+    csv_filename = f"{safe_app_name}_appstore_reviews.csv"
+    excel_filename = f"{safe_app_name}_appstore_reviews_structured.xlsx"
+else:
+    csv_filename = "appstore_reviews.csv"
+    excel_filename = "appstore_reviews_structured.xlsx"
 
-    csv_bytes = dataframe_to_csv_bytes(df)
+csv_bytes = dataframe_to_csv_bytes(df)
+
+excel_bytes = None
+excel_error = None
+
+try:
     excel_bytes = structured_tables_to_excel_bytes(structured_tables)
+except ImportError as e:
+    excel_error = (
+        "Не удалось создать Excel-файл: не установлена библиотека openpyxl. "
+        "Добавьте openpyxl в requirements.txt и перезапустите приложение."
+    )
+except Exception as e:
+    excel_error = f"Не удалось создать Excel-файл: {e}"
 
-    st.subheader("Скачать файлы")
+st.subheader("Скачать файлы")
 
-    download_col1, download_col2 = st.columns(2)
+download_col1, download_col2 = st.columns(2)
 
-    with download_col1:
-        st.download_button(
-            label="Скачать обычный CSV",
-            data=csv_bytes,
-            file_name=csv_filename,
-            mime="text/csv"
-        )
+with download_col1:
+    st.download_button(
+        label="Скачать обычный CSV",
+        data=csv_bytes,
+        file_name=csv_filename,
+        mime="text/csv"
+    )
 
-    with download_col2:
+with download_col2:
+    if excel_bytes:
         st.download_button(
             label="Скачать структурированный Excel",
             data=excel_bytes,
             file_name=excel_filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+    else:
+        st.warning(excel_error)
 
-    st.success("Файлы готовы к скачиванию.")
+st.success("CSV-файл готов к скачиванию.")
